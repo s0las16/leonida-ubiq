@@ -145,6 +145,27 @@ HRESULT XboxPresentation::present_x(UINT plane_count, const XboxPresentPlanePara
     // Unpaced (no interval registered, or uncapped): do not hold the queue for vblanks.
     const UINT sync_interval = pacer_.registered() && !pacer_.uncapped() ? 1 : 0;
 
+    // Which present path a frame takes and what it reads, for the first presents and every 100th: a black capture is
+    // either a blank present, a source that is not a bound image, or a source the title left black.
+    const std::uint64_t number = presents_.load(std::memory_order_relaxed) + 1;
+    if (number <= 3 || number % 100 == 0) {
+        if (plane_count == 0)
+            std::fprintf(stderr, "[rt] present: PresentX %llu: no planes, presented blank\n",
+                         static_cast<unsigned long long>(number));
+        for (UINT i = 0; i < plane_count; ++i) {
+            ID3D12Resource* r = planes[i].ResourceCount && planes[i].ppResources ? planes[i].ppResources[0] : nullptr;
+            const D3D12_RESOURCE_DESC d = r ? r->GetDesc() : D3D12_RESOURCE_DESC{};
+            const D3D12_RECT* rc = planes[i].pSrcViewRects;
+            std::fprintf(stderr,
+                         "[rt] present: PresentX %llu plane %u/%u: resource %p dim %d %llux%u format %d flags 0x%x "
+                         "plane flags 0x%x rect %ld,%ld-%ld,%ld\n",
+                         static_cast<unsigned long long>(number), i, plane_count, static_cast<void*>(r),
+                         int(d.Dimension), static_cast<unsigned long long>(d.Width), unsigned(d.Height), int(d.Format),
+                         unsigned(d.Flags), unsigned(planes[i].Flags), rc ? long(rc->left) : -1L, rc ? long(rc->top) : -1L,
+                         rc ? long(rc->right) : -1L, rc ? long(rc->bottom) : -1L);
+        }
+    }
+
     if (plane_count == 0) {
         const HRESULT result = presenter_->present_blank(sync_interval);
         if (SUCCEEDED(result)) {
@@ -265,6 +286,9 @@ HRESULT XboxPresentation::present_x(UINT plane_count, const XboxPresentPlanePara
             tear = leonida::decide_present_sync(timing.late_us, timing.period_us, threshold) == leonida::PresentSync::immediate;
         }
         const HRESULT result = presenter_->present_planes(composed, sync_interval, tear);
+        if (number <= 3 || number % 100 == 0)
+            std::fprintf(stderr, "[rt] present: PresentX %llu composed %u plane(s) -> 0x%08lx\n",
+                         static_cast<unsigned long long>(number), composed.count, static_cast<unsigned long>(result));
         if (FAILED(result)) return pacer_.suspended() ? from_pacer(hr::invalid_state) : result;
         pacer_.commit_present_token(token, plane_count,
                                     tear && presenter_->last_present_tore() ? leonida::PresentSync::immediate
@@ -296,6 +320,9 @@ HRESULT XboxPresentation::present_x(UINT plane_count, const XboxPresentPlanePara
         tear = leonida::decide_present_sync(timing.late_us, timing.period_us, threshold) == leonida::PresentSync::immediate;
     }
     const HRESULT result = presenter_->present(resource, sync_interval, rect, tear);
+    if (number <= 3 || number % 100 == 0)
+        std::fprintf(stderr, "[rt] present: PresentX %llu blit -> 0x%08lx\n", static_cast<unsigned long long>(number),
+                     static_cast<unsigned long>(result));
     if (FAILED(result)) return pacer_.suspended() ? from_pacer(hr::invalid_state) : result;
     pacer_.commit_present_token(token, plane_count,
                                 tear && presenter_->last_present_tore() ? leonida::PresentSync::immediate
