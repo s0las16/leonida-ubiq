@@ -984,7 +984,34 @@ struct DeviceState {
     // LEONIDA_DRAW_LOG: whether the arena range [va, va + bytes) is a per-submission copy of the title's memory (a
     // slot-133 shadow or a window a shader address named) and, if so, the first 32 bytes of both sides: the copy is
     // refreshed only when a submission starts, so the title's side shows what the GPU will read.
+    // The buffers log_buffer_owner saw, logged again once the submission's copies are refreshed: what the GPU reads.
+    std::mutex after_refresh_mutex;
+    std::vector<std::pair<std::uint64_t, std::uint32_t>> after_refresh;
+    void log_after_refresh() {
+        std::vector<std::pair<std::uint64_t, std::uint32_t>> pending;
+        {
+            std::lock_guard lock(after_refresh_mutex);
+            if (after_refresh.empty()) return;
+            pending.swap(after_refresh);
+        }
+        for (const auto& [va, bytes] : pending) {
+            for (std::uint32_t off = 0; off + 32 <= bytes; off += 32) {
+                const auto* w = reinterpret_cast<const std::uint32_t*>(arena.mapped + va + off);
+                std::fprintf(stderr,
+                             "[rt] d3d12:   at submission, buffer 0x%llx +%u: %08x %08x %08x %08x %08x %08x %08x %08x\n",
+                             static_cast<unsigned long long>(va), off, w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7]);
+            }
+            for (std::uint32_t off = 0; off + 32 <= bytes; off += 32)
+                if ((reinterpret_cast<const std::uint32_t*>(arena.mapped + va + off)[3] >> 28) >= 8)
+                    log_tsharp(va, 0, off, arena.mapped + va + off);
+        }
+    }
+
     void log_buffer_owner(std::uint64_t va, std::uint32_t bytes) {
+        {
+            std::lock_guard lock(after_refresh_mutex);
+            if (after_refresh.size() < 64) after_refresh.emplace_back(va, bytes);
+        }
         const std::uint8_t* at = arena.mapped + va;
         const std::uint8_t* source = nullptr;
         {
@@ -5863,7 +5890,10 @@ public:
                                                                   info.conditional_rendering, info.ray_tracing,
                                                                   info.xdxr_acceleration_structures &&
                                                                       info.buffer_device_address);
-        state_.context->set_before_execute([this] { state_.refresh_shadows(); });
+        state_.context->set_before_execute([this] {
+            state_.refresh_shadows();
+            state_.log_after_refresh();
+        });
         {
             char text[16] = {};
             size_t length = 0;
