@@ -2546,6 +2546,12 @@ public:
             buffer_va_ = vk.vkGetBufferDeviceAddress(device_.info.device, &bda);
             gpu_va_ = buffer_va_;
         }
+        if (device_.arena.address && buffer_va_ &&
+            (buffer_va_ < device_.arena.address || ((buffer_va_ - device_.arena.address) >> 48) != 0)) {
+            log_once("title-placed host import lies outside V# 48-bit range above heap_base; using arena shadow instead; bits 48-63:",
+                     int((buffer_va_ - device_.arena.address) >> 48));
+            return E_NOTIMPL;
+        }
         device_.log_va("title-placed buffer", va_, desc_.Width);
         leonida::ResourceBinding binding{};
         binding.buffer = buffer_;
