@@ -3882,6 +3882,7 @@ public:
 
     bool compute() const { return registered_ && !is_graphics_; }
     bool graphics() const { return registered_ && is_graphics_; }
+    const std::string& summary() const { return summary_; }
     const std::vector<leonida::SubgroupRequest>& subgroup_requests() const { return subgroup_requests_; }
 
     // A VS (+ GS) (+ PS) pipeline for dynamic rendering. Vertex input comes from the input layout matched to the
@@ -4489,6 +4490,24 @@ public:
         recipe_.depth = depth;
         recipe_.blends = std::move(blends);
         recipe_.blend = blend;
+        if (std::getenv("LEONIDA_DRAW_LOG")) {  // what the command list's draw log prints for this PSO
+            const D3D12_RENDER_TARGET_BLEND_DESC& b = desc.BlendState.RenderTarget[0];
+            const auto shader = [](const Stage& s) {
+                return s.entry ? s.entry->name + " " + leonida::sha256_hex(s.fssm).substr(0, 16) : std::string("-");
+            };
+            char text[256];
+            std::snprintf(text, sizeof text,
+                          " | RTs %u fmt %d dsv %d depth test %d write %d | blend %d src %d dst %d op %d alpha "
+                          "%d/%d/%d mask 0x%x a2c %d sample mask 0x%x | cull %d ccw %d clip %d",
+                          desc.NumRenderTargets, int(desc.RTVFormats[0]), int(desc.DSVFormat), int(ds.DepthEnable),
+                          int(ds.DepthWriteMask), int(b.BlendEnable), int(b.SrcBlend), int(b.DestBlend),
+                          int(b.BlendOp), int(b.SrcBlendAlpha), int(b.DestBlendAlpha), int(b.BlendOpAlpha),
+                          unsigned(b.RenderTargetWriteMask), int(desc.BlendState.AlphaToCoverageEnable),
+                          unsigned(desc.SampleMask), int(r.CullMode), int(r.FrontCounterClockwise),
+                          int(r.DepthClipEnable));
+            summary_ = "type " + std::to_string(topology_type) + (rect_list ? " (rect list)" : "") + " vs " +
+                       shader(vs_stage) + " gs " + shader(gs_stage) + " ps " + shader(ps_stage) + text;
+        }
         graphics_.pipeline = build(0);
         if (!graphics_.pipeline) return E_FAIL;
         graphics_.variant = [this](std::uint32_t unbound) { return variant(unbound); };
@@ -4771,6 +4790,7 @@ private:
     VkDeviceSize code_bytes_ = 0;
     bool registered_ = false;
     bool is_graphics_ = false;
+    std::string summary_;  // LEONIDA_DRAW_LOG only
     std::vector<leonida::SubgroupRequest> subgroup_requests_;  // one per stage, in creation order
     leonida::cached_pso::Key cache_key_;
 };
@@ -9558,6 +9578,11 @@ std::uintptr_t compute_pipeline_id(ID3D12PipelineState* pipeline) {
 std::uintptr_t graphics_pipeline_id(ID3D12PipelineState* pipeline) {
     const PipelineState* p = PipelineState::from<PipelineState>(pipeline);
     return p && p->graphics() ? p->id() : 0;
+}
+
+std::string graphics_pipeline_summary(ID3D12PipelineState* pipeline) {
+    const PipelineState* p = PipelineState::from<PipelineState>(pipeline);
+    return p && p->graphics() ? p->summary() : std::string();
 }
 
 const std::vector<leonida::SubgroupRequest>* pipeline_subgroup_requests(ID3D12PipelineState* pipeline) {

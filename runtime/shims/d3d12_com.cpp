@@ -1382,6 +1382,16 @@ private:
         hold(state);
         compute_pipeline_ = compute_pipeline_id(state);
         graphics_pipeline_ = graphics_pipeline_id(state);
+        static const bool pso_log = std::getenv("LEONIDA_DRAW_LOG") != nullptr;
+        if (pso_log && graphics_pipeline_) {
+            static std::mutex mutex;
+            static std::set<std::uintptr_t> logged;
+            std::lock_guard lock(mutex);
+            if (logged.size() < 256 && logged.insert(graphics_pipeline_).second)
+                std::fprintf(stderr, "[rt] d3d12: pso 0x%llx: %s\n",
+                             static_cast<unsigned long long>(graphics_pipeline_),
+                             graphics_pipeline_summary(state).c_str());
+        }
         if (state && !compute_pipeline_ && !graphics_pipeline_)
             stub("ID3D12GraphicsCommandList::SetPipelineState(pipeline from another device)");
     }
