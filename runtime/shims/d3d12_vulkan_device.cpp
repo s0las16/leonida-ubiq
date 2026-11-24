@@ -4506,7 +4506,14 @@ public:
                           unsigned(desc.SampleMask), int(r.CullMode), int(r.FrontCounterClockwise),
                           int(r.DepthClipEnable));
             summary_ = "type " + std::to_string(topology_type) + (rect_list ? " (rect list)" : "") + " vs " +
-                       shader(vs_stage) + " gs " + shader(gs_stage) + " ps " + shader(ps_stage) + text;
+                       shader(vs_stage) + " gs " + shader(gs_stage) + " ps " + shader(ps_stage) + text + " | inputs";
+            for (UINT i = 0; i < desc.InputLayout.NumElements && desc.InputLayout.pInputElementDescs; ++i) {
+                const D3D12_INPUT_ELEMENT_DESC& e = desc.InputLayout.pInputElementDescs[i];
+                char element[96];
+                std::snprintf(element, sizeof element, " %s%u fmt %d slot %u +%u", e.SemanticName ? e.SemanticName : "?",
+                              e.SemanticIndex, int(e.Format), e.InputSlot, e.AlignedByteOffset);
+                summary_ += element;
+            }
         }
         graphics_.pipeline = build(0);
         if (!graphics_.pipeline) return E_FAIL;

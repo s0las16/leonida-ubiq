@@ -419,6 +419,8 @@ std::uintptr_t compute_pipeline_id(ID3D12PipelineState* pipeline);
 std::uintptr_t graphics_pipeline_id(ID3D12PipelineState* pipeline);
 // LEONIDA_DRAW_LOG: a graphics PSO's shaders, blend, raster and target state as one line; empty otherwise.
 std::string graphics_pipeline_summary(ID3D12PipelineState* pipeline);
+// LEONIDA_PRESENT_RT: the render targets draws have written (their first target), in first-draw order.
+std::vector<leonida::ResourceId> drawn_render_targets();
 // What each stage of a Vulkan device's PSO asked for (src/subgroup_size.h), in creation order; null for another PSO.
 const std::vector<leonida::SubgroupRequest>* pipeline_subgroup_requests(ID3D12PipelineState* pipeline);
 

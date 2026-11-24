@@ -91,6 +91,22 @@ bool take_log_slot(std::atomic<long>& left) {
     }
     return n > 0;
 }
+bool present_rt_on() {
+    static const bool on = [] {
+        const char* env = std::getenv("LEONIDA_PRESENT_RT");
+        return env && *env && *env != '0';
+    }();
+    return on;
+}
+std::mutex drawn_targets_mutex;
+std::vector<leonida::ResourceId> drawn_targets;
+void note_drawn_target(leonida::ResourceId id) {
+    if (!id || !present_rt_on()) return;
+    std::lock_guard lock(drawn_targets_mutex);
+    if (std::find(drawn_targets.begin(), drawn_targets.end(), id) == drawn_targets.end() && drawn_targets.size() < 16)
+        drawn_targets.push_back(id);
+}
+
 bool clear_magenta() {
     static const bool on = [] {
         const char* env = std::getenv("LEONIDA_CLEAR_MAGENTA");
@@ -1499,6 +1515,7 @@ private:
                          scissor_.right, scissor_.bottom,
                          !(viewport_.width > 0) || !(viewport_.height > 0) ? " (no viewport: dropped)" : "");
         }
+        note_drawn_target(render_targets_[0].resource);
         // No viewport (never set, or unbound with RSSetViewports(0)) or an empty one: D3D12 rasterizes nothing,
         // and Vulkan forbids a 0x0 viewport, so the draw is not recorded.
         if (!(viewport_.width > 0) || !(viewport_.height > 0)) return;
@@ -2190,6 +2207,11 @@ bool bound_descriptor_heap_bases(ID3D12GraphicsCommandList* list, D3D12_GPU_VIRT
     cbv_srv_uav = l->cbv_srv_uav_base();
     sampler = l->sampler_base();
     return true;
+}
+
+std::vector<leonida::ResourceId> drawn_render_targets() {
+    std::lock_guard lock(drawn_targets_mutex);
+    return drawn_targets;
 }
 
 }  // namespace rt::d3d12

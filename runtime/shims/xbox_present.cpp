@@ -307,6 +307,33 @@ HRESULT XboxPresentation::present_x(UINT plane_count, const XboxPresentPlanePara
         log_once(logged_display_, "a present plane's resource was created without D3D12_HEAP_FLAG_ALLOW_DISPLAY; presenting it anyway");
 
     const D3D12_RECT* rect = plane.pSrcViewRects;
+    // LEONIDA_PRESENT_RT=1 (diagnostic): every 10 presents in turn, show one of the render targets draws have written
+    // instead of the plane (then the plane again), so a capture shows what each intermediate target holds.
+    if (static const bool peek = [] {
+            const char* env = std::getenv("LEONIDA_PRESENT_RT");
+            return env && *env && *env != '0';
+        }();
+        peek) {
+        const std::vector<leonida::ResourceId> targets = drawn_render_targets();
+        const std::size_t pick = std::size_t((number - 1) / 10) % (targets.size() + 1);
+        if (pick < targets.size()) {
+            auto* shown = reinterpret_cast<ID3D12Resource*>(targets[pick]);
+            const D3D12_RESOURCE_DESC d = shown->GetDesc();
+            if ((number - 1) % 10 == 0)
+                std::fprintf(stderr, "[rt] present: PresentX %llu-%llu show drawn RT %zu/%zu %p (%llux%u format %d) "
+                                     "instead of the plane\n",
+                             static_cast<unsigned long long>(number), static_cast<unsigned long long>(number + 9),
+                             pick + 1, targets.size(), static_cast<void*>(shown),
+                             static_cast<unsigned long long>(d.Width), unsigned(d.Height), int(d.Format));
+            if (d.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D) {
+                resource = shown;
+                rect = nullptr;
+            }
+        } else if ((number - 1) % 10 == 0) {
+            std::fprintf(stderr, "[rt] present: PresentX %llu-%llu show the plane\n",
+                         static_cast<unsigned long long>(number), static_cast<unsigned long long>(number + 9));
+        }
+    }
     if (rect && (rect->left < 0 || rect->top < 0 || rect->left >= rect->right || rect->top >= rect->bottom ||
                  UINT64(rect->right) > desc.Width || UINT(rect->bottom) > desc.Height))
         return E_INVALIDARG;
