@@ -2327,6 +2327,10 @@ public:
     // the BVH builder (below 2^40) can all hold (docs/d3d12_vulkan.md section 3.3, "Measured (D3D-53)"). When the arena
     // has no room for one, it keeps its own memory as before (logged once): its VA is then its device address minus
     // heap_base, which root descriptors and views resolve but a V# does not.
+    // Readback buffers stay out of the arena (review of #444): D3D12 binds no READBACK resource to a shader (no SRV,
+    // CBV or UAV), so an arena range would only take space a later default-heap buffer needs (a live 128 MiB readback
+    // buffer left no room for a 128 MiB default one in the 256 MiB arena), and the arena's memory is uncached for the
+    // CPU reads a readback buffer exists for. They keep their own HOST_CACHED memory, as before M8.
     HRESULT create_buffer(D3D12_RESOURCE_STATES initial_state = D3D12_RESOURCE_STATE_COMMON) {
         auto& vk = device_.context->vk;
         // A buffer has at least one byte, and its size must survive alignment to 64 KiB without wrapping.
@@ -2334,7 +2338,8 @@ public:
         const bool host = cpu_visible();
         leonida::ResourceBinding binding{};  // a buffer: no image
         binding.size = desc_.Width;
-        if (host && device_.arena.mapped && !(heap_.Type == D3D12_HEAP_TYPE_UPLOAD && device_.upload_sysmem)) {
+        if (host && device_.arena.mapped && heap_.Type != D3D12_HEAP_TYPE_READBACK &&
+            !(heap_.Type == D3D12_HEAP_TYPE_UPLOAD && device_.upload_sysmem)) {
             if (device_.arena_allocate(desc_.Width, D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT, arena_offset_,
                                        DeviceState::arena_buffer)) {
                 in_arena_ = true;

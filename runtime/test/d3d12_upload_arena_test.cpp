@@ -43,6 +43,16 @@ constexpr std::uint32_t kTag = 0x00ab0000;
 
 std::uint32_t input(UINT i) { return i * 7 + 1; }
 
+D3D12_RESOURCE_DESC plain_big(UINT64 bytes) {
+    D3D12_RESOURCE_DESC desc{};
+    desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    desc.Width = bytes;
+    desc.Height = desc.DepthOrArraySize = desc.MipLevels = 1;
+    desc.SampleDesc.Count = 1;
+    desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    return desc;
+}
+
 }  // namespace
 
 int main() {
@@ -95,8 +105,9 @@ int main() {
     EXPECT(SUCCEEDED(device->CreateCommittedResource(&readback_heap, D3D12_HEAP_FLAG_NONE, &plain,
                                                      D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
                                                      IID_PPV_ARGS(&readback.p))));
-    // Arena offsets: non-zero (the arena's first 64 KiB are never handed out) and below 4 GiB.
-    for (ID3D12Resource* r : {upload.p, readback.p}) {
+    // Arena offsets: non-zero (the arena's first 64 KiB are never handed out) and below 4 GiB. Readback buffers stay
+    // out of the arena (no shader can address one), so only the upload buffer's VA is an arena offset.
+    for (ID3D12Resource* r : {upload.p}) {
         const D3D12_GPU_VIRTUAL_ADDRESS va = r->GetGPUVirtualAddress();
         if (!va || va >= (1ull << 32)) std::fprintf(stderr, "VA 0x%llx is not an arena offset\n", (unsigned long long)va);
         EXPECT(va && va < (1ull << 32));
@@ -170,9 +181,31 @@ int main() {
     }
     readback->Unmap(0, nullptr);
     EXPECT(mismatches == 0);
-    std::printf("upload/readback in the arena: VAs 0x%llx and 0x%llx; %u words read through a V# on the upload "
-                "buffer and read back through the readback buffer's Map pointer match\n",
+
+    // Arena pressure (review of #444): a large readback buffer kept alive takes no arena space, so a default buffer
+    // created after it still gets its range. With the default 256 MiB arena, 160 MiB of readback and then 128 MiB of
+    // default-heap buffer do not fit together in the arena; both must still succeed.
+    const char* arena_env = std::getenv("LEONIDA_ARENA_MB");
+    bool pressure_checked = false;
+    if (!arena_env || !*arena_env) {
+        Ref<ID3D12Resource> big_readback, big_default;
+        const D3D12_RESOURCE_DESC readback_desc = plain_big(160ull << 20), default_desc = plain_big(128ull << 20);
+        const HRESULT readback_hr = device->CreateCommittedResource(
+            &readback_heap, D3D12_HEAP_FLAG_NONE, &readback_desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+            IID_PPV_ARGS(&big_readback.p));
+        const HRESULT default_hr = device->CreateCommittedResource(
+            &default_heap, D3D12_HEAP_FLAG_NONE, &default_desc, D3D12_RESOURCE_STATE_COMMON, nullptr,
+            IID_PPV_ARGS(&big_default.p));
+        std::printf("arena pressure: 160 MiB READBACK 0x%08lx, then 128 MiB DEFAULT 0x%08lx (VA 0x%llx)\n",
+                    static_cast<unsigned long>(readback_hr), static_cast<unsigned long>(default_hr),
+                    big_default.p ? (unsigned long long)big_default->GetGPUVirtualAddress() : 0ull);
+        EXPECT(SUCCEEDED(readback_hr) && SUCCEEDED(default_hr));
+        EXPECT(big_default->GetGPUVirtualAddress() < (1ull << 32));
+        pressure_checked = true;
+    }
+    std::printf("upload in the arena, readback in its own memory: VAs 0x%llx and 0x%llx; %u words read through a V# "
+                "on the upload buffer and read back through the readback buffer's Map pointer match%s\n",
                 (unsigned long long)upload->GetGPUVirtualAddress(), (unsigned long long)readback->GetGPUVirtualAddress(),
-                kCount);
+                kCount, pressure_checked ? "; a live readback buffer leaves the arena to default buffers" : "");
     return 0;
 }
