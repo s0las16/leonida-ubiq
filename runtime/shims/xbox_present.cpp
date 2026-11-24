@@ -5,6 +5,7 @@
 
 #include "../src/vulkan_present.h"
 
+#include <algorithm>
 #include <cerrno>
 #include <chrono>
 #include <cstdio>
@@ -307,15 +308,18 @@ HRESULT XboxPresentation::present_x(UINT plane_count, const XboxPresentPlanePara
         log_once(logged_display_, "a present plane's resource was created without D3D12_HEAP_FLAG_ALLOW_DISPLAY; presenting it anyway");
 
     const D3D12_RECT* rect = plane.pSrcViewRects;
-    // LEONIDA_PRESENT_RT=1 (diagnostic): every 10 presents in turn, show one of the render targets draws have written
-    // instead of the plane (then the plane again), so a capture shows what each intermediate target holds.
-    if (static const bool peek = [] {
-            const char* env = std::getenv("LEONIDA_PRESENT_RT");
-            return env && *env && *env != '0';
-        }();
-        peek) {
+    // LEONIDA_PRESENT_RT (diagnostic): <k> shows the k-th render target draws have written (first-draw order) instead
+    // of the plane on every present, once it exists; "cycle" shows each in turn for 10 presents, then the plane.
+    static const long peek = [] {
+        const char* env = std::getenv("LEONIDA_PRESENT_RT");
+        if (!env || !*env) return 0L;
+        if (std::strcmp(env, "cycle") == 0) return -1L;
+        return std::max(0L, std::atol(env));
+    }();
+    if (peek) {
         const std::vector<leonida::ResourceId> targets = drawn_render_targets();
-        const std::size_t pick = std::size_t((number - 1) / 10) % (targets.size() + 1);
+        const std::size_t pick = peek > 0 ? std::size_t(peek - 1)
+                                          : std::size_t((number - 1) / 10) % (targets.size() + 1);
         if (pick < targets.size()) {
             auto* shown = reinterpret_cast<ID3D12Resource*>(targets[pick]);
             const D3D12_RESOURCE_DESC d = shown->GetDesc();

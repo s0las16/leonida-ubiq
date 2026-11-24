@@ -409,6 +409,7 @@ public:
     }
     void STDMETHODCALLTYPE SetGraphicsRootDescriptorTable(UINT index, D3D12_GPU_DESCRIPTOR_HANDLE table) override {
         d3d12_trace::record("ID3D12GraphicsCommandList::SetGraphicsRootDescriptorTable");
+        if (index < diag_tables_.size()) diag_tables_[index] = table.ptr;
         address(graphics_, index, table.ptr, rt::rootsig::ParamType::Table);
     }
 
@@ -1328,6 +1329,7 @@ private:
     UINT back_stencil_ref_ = 0;
     RootState compute_;
     RootState graphics_;
+    std::array<std::uint64_t, 8> diag_tables_{};  // LEONIDA_DRAW_LOG: the last graphics descriptor tables, by index
     std::uintptr_t compute_pipeline_ = 0;
     std::uintptr_t graphics_pipeline_ = 0;
     ID3D12DescriptorHeap* cbv_srv_uav_heap_ = nullptr;
@@ -1499,6 +1501,51 @@ private:
     }
 
     // A draw needs a graphics pipeline, a graphics root signature and a topology.
+    // LEONIDA_DRAW_LOG: the first two rectangle-list draws of each PSO print their first three vertices of slot 0 and
+    // the first 32 bytes of each bound graphics descriptor table (a gfx10 T#/V# per descriptor), read with
+    // ReadProcessMemory so an address the host cannot read is reported instead of faulting.
+    void dump_rect_draw(UINT count, UINT first) {
+        static const bool on = std::getenv("LEONIDA_DRAW_LOG") != nullptr;
+        if (!on || topology_ != 17 || !graphics_pipeline_) return;
+        static std::mutex mutex;
+        static std::map<std::uintptr_t, int> seen;
+        {
+            std::lock_guard lock(mutex);
+            if (seen.size() > 64 || seen[graphics_pipeline_]++ >= 2) return;
+        }
+        const auto dump = [](const char* what, std::uint64_t va, std::size_t bytes) {
+            std::uint8_t data[96]{};
+            bytes = std::min(bytes, sizeof data);
+            SIZE_T got = 0;
+            if (!va || !ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(va), data, bytes, &got) ||
+                got != bytes) {
+                std::fprintf(stderr, "[rt] d3d12:   %s @0x%llx: not readable from the host\n", what,
+                             static_cast<unsigned long long>(va));
+                return;
+            }
+            std::string hex;
+            char byte[4];
+            for (std::size_t i = 0; i < bytes; ++i) {
+                std::snprintf(byte, sizeof byte, i % 4 == 3 ? "%02x " : "%02x", data[i]);
+                hex += byte;
+            }
+            std::fprintf(stderr, "[rt] d3d12:   %s @0x%llx: %s\n", what, static_cast<unsigned long long>(va),
+                         hex.c_str());
+        };
+        const leonida::VertexBufferView& vb = vertex_buffers_[0];
+        std::fprintf(stderr, "[rt] d3d12: rect draw pso 0x%llx count %u first %u: vb0 va 0x%llx size %u stride %u\n",
+                     static_cast<unsigned long long>(graphics_pipeline_), count, first,
+                     static_cast<unsigned long long>(vb.va), vb.size, vb.stride);
+        if (vb.va && vb.stride)
+            dump("vertices 0-2", vb.va + std::uint64_t(first) * vb.stride, std::size_t(vb.stride) * 3);
+        for (std::size_t i = 0; i < diag_tables_.size(); ++i)
+            if (diag_tables_[i]) {
+                char what[32];
+                std::snprintf(what, sizeof what, "table %zu", i);
+                dump(what, diag_tables_[i], 32);
+            }
+    }
+
     void record_draw(bool indexed, UINT count, UINT instances, UINT first, INT base_vertex, UINT first_instance) {
         if (!graphics_pipeline_ || !graphics_.layout || !topology_) return check(false);
         note_direct_heap_indexing(graphics_.layout);
@@ -1516,6 +1563,7 @@ private:
                          !(viewport_.width > 0) || !(viewport_.height > 0) ? " (no viewport: dropped)" : "");
         }
         note_drawn_target(render_targets_[0].resource);
+        dump_rect_draw(count, first);
         // No viewport (never set, or unbound with RSSetViewports(0)) or an empty one: D3D12 rasterizes nothing,
         // and Vulkan forbids a 0x0 viewport, so the draw is not recorded.
         if (!(viewport_.width > 0) || !(viewport_.height > 0)) return;
