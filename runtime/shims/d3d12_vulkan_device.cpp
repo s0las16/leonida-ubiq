@@ -978,6 +978,29 @@ struct DeviceState {
     // LEONIDA_DRAW_LOG: the first slots of the first bound tables, each as null, a V#, or a T# with its size and
     // format and whether set 0's hash table has it (a miss samples the fallback image). A missed T# also says whether
     // a registered T# has the same base address, i.e. the same texture with other bits.
+    void log_tsharp(std::uint64_t table_va, unsigned slot, std::uint32_t off, const std::uint8_t* at) {
+        leonida::gfx10::ImageWords w{};
+        std::memcpy(w.data(), at, sizeof(w));
+        const unsigned type = w[3] >> 28;
+        const std::uint64_t base = (std::uint64_t(w[0]) | (std::uint64_t(w[1] & 0xFFu) << 32)) << 8;
+        bool hit = false, same_base = false, half_hit = false;
+        {
+            std::lock_guard lock(descriptor_mutex);
+            hit = image_entries.find(w) != image_entries.end();
+            if (!hit) same_base = image_keys.count(base) != 0;
+            half_hit = sampler_entries.count(leonida::make_ssharp_key(w.data())) != 0;
+        }
+        std::fprintf(stderr,
+                     "[rt] d3d12: table 0x%llx slot %u +%u: type %u base 0x%llx %ux%u format %u -> %s "
+                     "(%08x %08x %08x %08x %08x %08x %08x %08x)\n",
+                     static_cast<unsigned long long>(table_va), slot, off, type, static_cast<unsigned long long>(base),
+                     (((w[1] >> 30) & 3u) | ((w[2] & 0xFFFu) << 2)) + 1, ((w[2] >> 14) & 0x3FFFu) + 1,
+                     (w[1] >> 20) & 0x1FFu,
+                     hit ? "T# hash hit" : half_hit ? "S# hash hit (first 16 bytes)"
+                         : same_base ? "T# MISS (a registered T# has this base)" : "no T#/S# match",
+                     w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7]);
+    }
+
     void log_table_once(std::uint64_t table_va, VkDeviceSize end) {
         static const bool on = std::getenv("LEONIDA_DRAW_LOG") != nullptr;
         if (!on) return;
@@ -999,10 +1022,15 @@ struct DeviceState {
             }
             const unsigned type = w[3] >> 28;
             if (type < 8) {
+                const std::uint64_t vbase = std::uint64_t(w[0]) | (std::uint64_t(w[1] & 0xFFFFu) << 32);
                 std::fprintf(stderr, "[rt] d3d12: table 0x%llx slot %u: V# base 0x%llx stride %u records %u\n",
-                             static_cast<unsigned long long>(table_va), slot,
-                             static_cast<unsigned long long>(std::uint64_t(w[0]) | (std::uint64_t(w[1] & 0xFFFFu) << 32)),
+                             static_cast<unsigned long long>(table_va), slot, static_cast<unsigned long long>(vbase),
                              (w[1] >> 16) & 0x3FFFu, w[2]);
+                // A small raw buffer may hold the T#s and S#s the shader loads: classify each 32 bytes of it.
+                if (vbase && vbase < arena.size && !((w[1] >> 16) & 0x3FFFu) && w[2] && w[2] <= 512 &&
+                    vbase + w[2] <= arena.size)
+                    for (std::uint32_t off = 0; off + 32 <= w[2]; off += 32)
+                        log_tsharp(table_va, slot, off, arena.mapped + vbase + off);
                 continue;
             }
             const std::uint64_t base = (std::uint64_t(w[0]) | (std::uint64_t(w[1] & 0xFFu) << 32)) << 8;
