@@ -76,6 +76,31 @@ void stub(const char* method) {
 
 namespace {
 
+// LEONIDA_DRAW_LOG=<n>: log the first n draws (with what they target, and the ones dropped for an empty viewport)
+// and the first n render-target clears. LEONIDA_CLEAR_MAGENTA=1: every ClearRenderTargetView clears to opaque
+// magenta, so a frame that stays black was drawn black over the clear (or is not a cleared target).
+std::atomic<long> draw_log_left{-1}, clear_log_left{-1};
+bool take_log_slot(std::atomic<long>& left) {
+    if (left.load(std::memory_order_relaxed) == -1) {
+        const char* env = std::getenv("LEONIDA_DRAW_LOG");
+        long expected = -1;
+        left.compare_exchange_strong(expected, env ? std::max(0L, std::atol(env)) : 0L);
+    }
+    long n = left.load(std::memory_order_relaxed);
+    while (n > 0 && !left.compare_exchange_weak(n, n - 1)) {
+    }
+    return n > 0;
+}
+bool clear_magenta() {
+    static const bool on = [] {
+        const char* env = std::getenv("LEONIDA_CLEAR_MAGENTA");
+        const bool set = env && *env && *env != '0';
+        if (set) std::fprintf(stderr, "[rt] d3d12: LEONIDA_CLEAR_MAGENTA: render-target clears are magenta\n");
+        return set;
+    }();
+    return on;
+}
+
 // Reports a deliberate simplification once (unlike stub, which reports a method not implemented).
 void note_once(const char* what) {
     static std::mutex mutex;
@@ -705,8 +730,16 @@ public:
         d3d12_trace::record("ID3D12GraphicsCommandList::ClearRenderTargetView");
         if (type_ == D3D12_COMMAND_LIST_TYPE_BUNDLE) return check(false);
         if (!view.ptr || !color) return check(false);
-        check(list_.clear_render_target(*reinterpret_cast<const leonida::TargetView*>(view.ptr),
-                                        {color[0], color[1], color[2], color[3]}, to_rects(count, rects)));
+        const auto& target = *reinterpret_cast<const leonida::TargetView*>(view.ptr);
+        if (take_log_slot(clear_log_left))
+            std::fprintf(stderr, "[rt] d3d12: clear RT %p mip %u format %u to %g %g %g %g (%u rect(s))\n",
+                         reinterpret_cast<void*>(target.resource), target.mip, unsigned(target.format), color[0],
+                         color[1], color[2], color[3], count);
+        if (clear_magenta()) {
+            check(list_.clear_render_target(target, {1.0f, 0.0f, 1.0f, 1.0f}, to_rects(count, rects)));
+            return;
+        }
+        check(list_.clear_render_target(target, {color[0], color[1], color[2], color[3]}, to_rects(count, rects)));
     }
 
     void STDMETHODCALLTYPE ClearDepthStencilView(D3D12_CPU_DESCRIPTOR_HANDLE view, D3D12_CLEAR_FLAGS flags,
@@ -1443,6 +1476,19 @@ private:
     void record_draw(bool indexed, UINT count, UINT instances, UINT first, INT base_vertex, UINT first_instance) {
         if (!graphics_pipeline_ || !graphics_.layout || !topology_) return check(false);
         note_direct_heap_indexing(graphics_.layout);
+        if (take_log_slot(draw_log_left)) {
+            const auto& rt = render_targets_;
+            std::fprintf(stderr,
+                         "[rt] d3d12: draw%s pso 0x%llx topo %u count %u x%u first %u | RTs %u: %p f%u %p f%u depth %p | "
+                         "viewport %g,%g %gx%g depth %g-%g scissor %d,%d-%d,%d%s\n",
+                         indexed ? " indexed" : "", static_cast<unsigned long long>(graphics_pipeline_), topology_,
+                         count, instances, first, render_target_count_, reinterpret_cast<void*>(rt[0].resource),
+                         unsigned(rt[0].format), reinterpret_cast<void*>(rt[1].resource), unsigned(rt[1].format),
+                         reinterpret_cast<void*>(depth_.resource), viewport_.x, viewport_.y, viewport_.width,
+                         viewport_.height, viewport_.min_depth, viewport_.max_depth, scissor_.left, scissor_.top,
+                         scissor_.right, scissor_.bottom,
+                         !(viewport_.width > 0) || !(viewport_.height > 0) ? " (no viewport: dropped)" : "");
+        }
         // No viewport (never set, or unbound with RSSetViewports(0)) or an empty one: D3D12 rasterizes nothing,
         // and Vulkan forbids a 0x0 viewport, so the draw is not recorded.
         if (!(viewport_.width > 0) || !(viewport_.height > 0)) return;
