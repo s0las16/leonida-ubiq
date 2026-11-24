@@ -981,6 +981,41 @@ struct DeviceState {
     // LEONIDA_DRAW_LOG: the first slots of the first bound tables, each as null, a V#, or a T# with its size and
     // format and whether set 0's hash table has it (a miss samples the fallback image). A missed T# also says whether
     // a registered T# has the same base address, i.e. the same texture with other bits.
+    // LEONIDA_DRAW_LOG: whether the arena range [va, va + bytes) is a per-submission copy of the title's memory (a
+    // slot-133 shadow or a window a shader address named) and, if so, the first 32 bytes of both sides: the copy is
+    // refreshed only when a submission starts, so the title's side shows what the GPU will read.
+    void log_buffer_owner(std::uint64_t va, std::uint32_t bytes) {
+        const std::uint8_t* at = arena.mapped + va;
+        const std::uint8_t* source = nullptr;
+        {
+            std::lock_guard lock(shadow_mutex);
+            for (const Shadow& s : shadows)
+                if (at >= s.mapped && at + bytes <= s.mapped + s.size) {
+                    source = s.pages + (at - s.mapped);
+                    break;
+                }
+        }
+        const auto words = [](const std::uint8_t* p, bool guarded) {
+            std::uint32_t w[8]{};
+            SIZE_T got = 0;
+            if (guarded ? !ReadProcessMemory(GetCurrentProcess(), p, w, sizeof w, &got) || got != sizeof w
+                        : (std::memcpy(w, p, sizeof w), false))
+                return std::string("unreadable");
+            char text[96];
+            std::snprintf(text, sizeof text, "%08x %08x %08x %08x %08x %08x %08x %08x", w[0], w[1], w[2], w[3], w[4],
+                          w[5], w[6], w[7]);
+            return std::string(text);
+        };
+        if (!source) {
+            std::fprintf(stderr, "[rt] d3d12:   buffer 0x%llx (%u B) is not a copy of title memory; arena: %s\n",
+                         static_cast<unsigned long long>(va), bytes, words(at, false).c_str());
+            return;
+        }
+        std::fprintf(stderr, "[rt] d3d12:   buffer 0x%llx (%u B) copies title memory %p; arena: %s; title: %s\n",
+                     static_cast<unsigned long long>(va), bytes, static_cast<const void*>(source),
+                     words(at, false).c_str(), words(source, true).c_str());
+    }
+
     void log_tsharp(std::uint64_t table_va, unsigned slot, std::uint32_t off, const std::uint8_t* at) {
         leonida::gfx10::ImageWords w{};
         std::memcpy(w.data(), at, sizeof(w));
@@ -1031,9 +1066,11 @@ struct DeviceState {
                              (w[1] >> 16) & 0x3FFFu, w[2]);
                 // A small raw buffer may hold the T#s and S#s the shader loads: classify each 32 bytes of it.
                 if (vbase && vbase < arena.size && !((w[1] >> 16) & 0x3FFFu) && w[2] && w[2] <= 512 &&
-                    vbase + w[2] <= arena.size)
+                    vbase + w[2] <= arena.size) {
                     for (std::uint32_t off = 0; off + 32 <= w[2]; off += 32)
                         log_tsharp(table_va, slot, off, arena.mapped + vbase + off);
+                    log_buffer_owner(vbase, w[2]);
+                }
                 continue;
             }
             const std::uint64_t base = (std::uint64_t(w[0]) | (std::uint64_t(w[1] & 0xFFu) << 32)) << 8;
@@ -7224,6 +7261,13 @@ public:
         buffer.format = leonida::gfx10::format_from_vulkan(VK_FORMAT_R32_UINT);
         buffer.oob_select = leonida::gfx10::OobSelect::raw;
         buffer.address = vsharp_address(buffer.address, desc->SizeInBytes);
+        static std::atomic<int> cbv_log_left{std::getenv("LEONIDA_DRAW_LOG") ? 64 : 0};
+        if (cbv_log_left.load(std::memory_order_relaxed) > 0 && cbv_log_left.fetch_sub(1, std::memory_order_relaxed) > 0)
+            std::fprintf(stderr, "[rt] d3d12: CBV 0x%llx (%u B) -> V# base 0x%llx%s\n",
+                         static_cast<unsigned long long>(desc->BufferLocation), desc->SizeInBytes,
+                         static_cast<unsigned long long>(buffer.address),
+                         state_.context && state_.context->knows_buffer_va(desc->BufferLocation) ? " (a buffer's VA)"
+                         : desc->BufferLocation >= state_.arena.size ? " (outside the arena)" : "");
         const leonida::gfx10::BufferWords words = leonida::gfx10::encode(buffer);
         std::memcpy(reinterpret_cast<void*>(destination.ptr), words.data(), sizeof(words));
     }
