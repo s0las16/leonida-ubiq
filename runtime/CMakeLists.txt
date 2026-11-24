@@ -2713,6 +2713,32 @@ if(TARGET Vulkan::Headers)
       add_test(NAME d3d12_m4_compute COMMAND d3d12_m4_compute_test)
       set_tests_properties(d3d12_m4_compute PROPERTIES SKIP_RETURN_CODE 77)
 
+      # M8: upload and readback buffers in the GPU address arena; cs_upload_read.asm reads the upload buffer through a
+      # V# (LEONIDA_USER_DATA_SHIFT=4: root arguments from s4, as the M5 3D UAV shaders).
+      set(LEONIDA_UPLOAD_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated/upload_shaders)
+      set(LEONIDA_UPLOAD_FILES ${LEONIDA_UPLOAD_DIR}/spirv/index.json ${LEONIDA_UPLOAD_DIR}/fssm/cs_upload_read.fssm)
+      add_custom_command(
+        OUTPUT ${LEONIDA_UPLOAD_FILES}
+        COMMAND ${CMAKE_COMMAND} -E remove_directory ${LEONIDA_UPLOAD_DIR}
+        COMMAND ${CMAKE_COMMAND} -E env "LLVM_MC=${LEONIDA_LLVM_MC}" "LEONIDA_SPIRV_TOOLS=${LEONIDA_SPIRV_TOOLS_NATIVE}"
+                LEONIDA_USER_DATA_SHIFT=4
+                $<TARGET_FILE:Python3::Interpreter> -I ${CMAKE_CURRENT_SOURCE_DIR}/test/shaders/build.py
+                ${LEONIDA_UPLOAD_DIR} cs_upload_read
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/test/shaders/build.py
+                ${CMAKE_CURRENT_SOURCE_DIR}/test/shaders/compute_fixture.py
+                ${CMAKE_CURRENT_SOURCE_DIR}/test/shaders/cs_upload_read.asm
+                ${CMAKE_CURRENT_SOURCE_DIR}/../tools/rdna2spirv.py
+        COMMENT "Translating cs_upload_read for the upload-arena test"
+        VERBATIM)
+      add_executable(d3d12_upload_arena_test test/d3d12_upload_arena_test.cpp ${LEONIDA_UPLOAD_FILES})
+      target_link_libraries(d3d12_upload_arena_test PRIVATE gta6rt_d3d12_com)
+      target_compile_definitions(d3d12_upload_arena_test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX
+                                 LEONIDA_TEST_UPLOAD_DIR="${LEONIDA_UPLOAD_DIR}")
+      target_compile_options(d3d12_upload_arena_test PRIVATE /W4 /permissive- /utf-8)
+      add_test(NAME d3d12_upload_arena COMMAND d3d12_upload_arena_test)
+      set_tests_properties(d3d12_upload_arena PROPERTIES SKIP_RETURN_CODE 77
+                           FAIL_REGULAR_EXPRESSION "Validation Error;VUID-")
+
       # Typed buffer UAVs and UAV counters: cs_buf_typed.asm writes typed views through V#s with a FORMAT, and
       # cs_buf_counter.asm appends to and consumes from a structured view whose counter is the second V# of its slot;
       # the test also compares typed-buffer and counter clears with the host runtime on the layer's adapter.

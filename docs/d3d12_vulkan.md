@@ -802,11 +802,17 @@ The compute path, end to end:
   - The device logs the arena's high-water mark when it is destroyed: the peak end offset against the size, the
     most bytes live at once (by use: buffers, descriptor heaps, shaders, heaps), allocations and refusals (D3D-55).
     `LEONIDA_ARENA_LOG=1` also logs one line per VA handed out, per refused allocation, and per upload or readback
-    buffer VA outside the arena.
+    buffer VA outside the arena (one the arena had no room for).
   - Default-heap buffers are 64 KiB-aligned ranges in it, zeroed through its mapping; their console VA is the offset.
   - Shader-visible descriptor heaps also live in it: the CPU handle is its host mapping and the GPU handle is the VA,
     so descriptor bytes the application writes itself are what shaders load.
-  - Upload and readback buffers keep their own memory, and their VA is their device address minus the heap base.
+  - Committed upload and readback buffers are 64 KiB-aligned ranges in it too (M8), zeroed through its mapping: their
+    `Map` pointer is that mapping and their console VA the offset, so a V#, a 32-bit table pointer and the BVH builder
+    reach them like any buffer (`d3d12_upload_arena_test`). They share the arena's budget (`LEONIDA_ARENA_MB`, 256 MiB
+    by default) and its memory type, which prefers `DEVICE_LOCAL | HOST_VISIBLE` (Resizable BAR): a CPU read of a
+    readback buffer there is uncached, slower than the `HOST_CACHED` memory it had. One the arena has no room for keeps
+    its own memory, logged once, with the old VA (device address minus heap base, which a V# cannot hold);
+    `LEONIDA_UPLOAD_SYSMEM=1` keeps upload buffers out of the arena that way. Placed buffers were arena ranges already.
   - Shader programs (FSSM blobs) are copied in as the code base.
 - **`CreateRootSignature`** parses the blob with `parse_rts0` and keeps each parameter's place in two layouts:
   `pack()` for the graphics bind point and `pack_stage(Stage::Compute)` for the compute one (from s4, one dword per
@@ -1495,7 +1501,7 @@ The layer therefore owns the console VAs. It returns them from `ID3D12Resource::
 | Heaps and placed resources | `CreateHeap` reserves the requested size in the arena, so a buffer placed at a 64 KiB-aligned offset is that offset into the arena and its console VA is the heap's place plus the offset. A placed texture (1D, 2D or 3D) gets its own `VkDeviceMemory`; one the title placed at its own address through the console's `CreatePlacedResourceX` (Xbox device slot 133) reports that title address from `GetGPUVirtualAddress`, as the console does — a title turns it into the CPU pointer it clears the texture through — while its pixels do not alias the title's pages yet. Any other texture answers a null VA, as on D3D12. Tiled (`64KB_UNDEFINED_SWIZZLE` and Xbox `0x101`) 2D/3D placed textures (D3D-191) and multisampled 2D placed textures (D3D-222) share that backing, answer `GetResourceAllocationInfo` and `GetResourceTiling`, and check heap/offset alignments. Reserved buffers can use heap tile mappings (section 4.2). |
 | Descriptor heaps | Shader-visible CBV/SRV/UAV and sampler heaps are allocated in the low 4 GB of the arena. RTV/DSV heaps are host-side only. |
 | Shader code | Each FSSM blob is uploaded to the arena; its console VA is the code base. |
-| Upload/readback | `D3D12_HEAP_TYPE_UPLOAD`/`READBACK` resources are separate host-visible buffers outside the arena. Their console VAs are only used by copy APIs; if the game binds one as a vertex/index buffer or reads it in a shader, the layer biases the view/descriptor by `-heap_base` so the shader's addition lands on the host BDA (**ASSUMPTION**; **measured to fail for a V#**, see below). |
+| Upload/readback | `D3D12_HEAP_TYPE_UPLOAD`/`READBACK` buffers are ranges of the arena (M8, decided by the measurement below): host-visible, mapped through the arena's mapping, console VA = offset, like default-heap buffers. Only when the arena is full (or `LEONIDA_UPLOAD_SYSMEM=1` for upload buffers) does one keep its own memory with the biased VA described next, logged once. |
 
 **Measured (XCL, retail title, PR #168):** the console answers a placed texture's `GetGPUVirtualAddress` with the
 address the title placed it at; the title clears a 256×256 `R32_FLOAT` texture through that value as a CPU pointer.
@@ -1519,8 +1525,9 @@ GPUs (`0xffffffffffce0000` on the AMD Radeon 880M, `0xffffffffffedc000` on the R
 address lay below the arena's, an allocation-order fact of these runs, so it is not guaranteed either way). The shader
 adds `heap_base` to the truncated 48-bit value, which is a wild address: the draw faults and the whole queue submission is lost
 (the clear that came before it is lost as well). Any resource a game can put in a V# (a vertex, constant or structured buffer
-behind a descriptor) must therefore be an arena range, whatever the allocator happens to do, upload and readback heaps included. Until the layer does that, the
-translated-draw test fetches from a DEFAULT-heap buffer and does not draw from the upload buffer.
+behind a descriptor) must therefore be an arena range, whatever the allocator happens to do, upload and readback heaps included.
+The layer does that now (M8): `d3d12_upload_arena_test` reads an upload buffer through a raw SRV V# and reads the result
+back through a readback buffer's `Map` pointer. (The translated-draw test still fetches from a DEFAULT-heap buffer.)
 
 **Measured (static, `XboxBvhBuilder.dll`): the BVH builder only takes destination addresses below 2^40.** Its
 validation function at `0xc8f0` loads `DestAccelerationStructureData` (the first field of the build description it

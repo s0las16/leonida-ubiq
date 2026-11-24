@@ -236,8 +236,11 @@ HRESULT create_console_descriptor_heap(ID3D12Device* device, const D3D12_DESCRIP
 
 // The VkImage behind a texture created by such a device, or VK_NULL_HANDLE. For tests and the swapchain.
 VkImage vulkan_image(ID3D12Resource* resource);
-// The VkBuffer behind a buffer created by such a device, or VK_NULL_HANDLE. For tests.
+// The VkBuffer of its own behind a buffer created by such a device, or VK_NULL_HANDLE: a buffer that is a range of the
+// GPU address arena (default, upload and readback buffers, placed ones) has none. For tests.
 VkBuffer vulkan_buffer(ID3D12Resource* resource);
+// The VkBuffer that holds a buffer and where in it the buffer starts (its own at 0, or the arena at its VA). For tests.
+bool vulkan_buffer_range(ID3D12Resource* resource, VkBuffer& buffer, VkDeviceSize& offset);
 // What a device from create_vulkan_device* was created with (enabled features included), or null. For tests.
 const VulkanDeviceInfo* vulkan_device_info(ID3D12Device* device);
 // True when `device` has VK_KHR_acceleration_structure + VK_KHR_ray_query enabled.

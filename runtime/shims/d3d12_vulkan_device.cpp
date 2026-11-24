@@ -778,7 +778,10 @@ struct DeviceState {
     VkPhysicalDeviceMemoryProperties memory{};
     // D3D-96: upload-heap buffers prefer DEVICE_LOCAL | HOST_VISIBLE memory, so the GPU reads them from VRAM. Only
     // with Resizable BAR (leonida::resizable_bar); LEONIDA_UPLOAD_SYSMEM=1 keeps them in system memory to compare.
+    // M8: committed upload buffers live in the arena, whose memory prefers the same; LEONIDA_UPLOAD_SYSMEM=1 keeps
+    // them out of it, in their own system memory (upload_sysmem), with the old VA (a V# cannot reach them).
     bool upload_in_vram = false;
+    bool upload_sysmem = false;
     // D3D-299: the first texture or default-heap buffer that lands outside device-local memory is logged, once.
     mutable std::once_flag spill_logged;
 
@@ -2318,9 +2321,12 @@ public:
     VkMemoryPropertyFlags memory_flags() const { return memory_flags_; }  // of the memory type behind it
     const DeviceState& device_state() const { return device_; }
 
-    // Default-heap buffers are ranges of the GPU address arena: console VA = offset, zeroed through the arena's host
-    // mapping. Upload and readback buffers keep their own host memory; with buffer device addresses their console
-    // VA is their device address minus heap_base, so a shader's heap_base + VA still lands on them (section 3.3).
+    // Every buffer is a range of the GPU address arena: console VA = offset, zeroed through the arena's host mapping.
+    // Upload and readback buffers too (M8): the arena is host-visible and coherent, so their Map pointer is that
+    // range's mapping, and their VA is an arena offset like any other, which a V# (48 bits), a 32-bit table pointer and
+    // the BVH builder (below 2^40) can all hold (docs/d3d12_vulkan.md section 3.3, "Measured (D3D-53)"). When the arena
+    // has no room for one, it keeps its own memory as before (logged once): its VA is then its device address minus
+    // heap_base, which root descriptors and views resolve but a V# does not.
     HRESULT create_buffer(D3D12_RESOURCE_STATES initial_state = D3D12_RESOURCE_STATE_COMMON) {
         auto& vk = device_.context->vk;
         // A buffer has at least one byte, and its size must survive alignment to 64 KiB without wrapping.
@@ -2328,6 +2334,29 @@ public:
         const bool host = cpu_visible();
         leonida::ResourceBinding binding{};  // a buffer: no image
         binding.size = desc_.Width;
+        if (host && device_.arena.mapped && !(heap_.Type == D3D12_HEAP_TYPE_UPLOAD && device_.upload_sysmem)) {
+            if (device_.arena_allocate(desc_.Width, D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT, arena_offset_,
+                                       DeviceState::arena_buffer)) {
+                in_arena_ = true;
+                va_ = arena_offset_;
+                mapped_ = device_.arena.mapped + arena_offset_;
+                std::memset(mapped_, 0, std::size_t(desc_.Width));  // committed resources start zeroed
+                memory_flags_ = device_.memory.memoryTypes[device_.arena.memory_type].propertyFlags;
+                binding.va = va_;
+                binding.buffer = device_.arena.buffer;
+                binding.buffer_offset = arena_offset_;
+                // Upload (and CPU-written custom) bytes are inputs host_at() may read; readback bytes are GPU-written.
+                binding.host = cpu_writable() ? static_cast<const std::uint8_t*>(mapped_) : nullptr;
+                binding.host_readable = (heap_.Type == D3D12_HEAP_TYPE_READBACK ||
+                                         (heap_.Type == D3D12_HEAP_TYPE_CUSTOM &&
+                                          heap_.CPUPageProperty == D3D12_CPU_PAGE_PROPERTY_WRITE_BACK));
+                device_.context->add_resource(id(), binding);
+                return S_OK;
+            }
+            log_once("GPU address arena full: an upload or readback buffer keeps its own memory, so a V# cannot "
+                     "reach it (raise LEONIDA_ARENA_MB); size in KiB:",
+                     int(desc_.Width / 1024));
+        }
         if (!host && device_.arena.mapped) {
             if (!device_.arena_allocate(desc_.Width, D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT, arena_offset_,
                                         DeviceState::arena_buffer)) {
@@ -5727,6 +5756,7 @@ public:
             size_t length = 0;
             const bool sysmem = getenv_s(&length, text, "LEONIDA_UPLOAD_SYSMEM") == 0 && length > 1 && text[0] != '0';
             state_.upload_in_vram = leonida::resizable_bar(state_.memory) && !sysmem;
+            state_.upload_sysmem = sysmem;
             std::fprintf(stderr, "[rt] d3d12: upload heaps in %s\n",
                          state_.upload_in_vram ? "VRAM (DEVICE_LOCAL | HOST_VISIBLE, Resizable BAR)"
                          : sysmem             ? "system memory (LEONIDA_UPLOAD_SYSMEM)"
@@ -9704,6 +9734,19 @@ VkMemoryPropertyFlags vulkan_memory_flags(ID3D12Resource* resource) {
 VkBuffer vulkan_buffer(ID3D12Resource* resource) {
     const Resource* r = Resource::from<Resource>(resource);
     return r ? r->buffer() : VK_NULL_HANDLE;
+}
+
+bool vulkan_buffer_range(ID3D12Resource* resource, VkBuffer& buffer, VkDeviceSize& offset) {
+    Resource* r = Resource::from<Resource>(resource);
+    if (!r || r->image()) return false;
+    if (r->buffer()) {
+        buffer = r->buffer();
+        offset = 0;
+        return true;
+    }
+    buffer = r->device_state().arena.buffer;  // an arena range: its offset is its console VA
+    offset = r->GetGPUVirtualAddress();
+    return buffer != VK_NULL_HANDLE;
 }
 
 const VulkanDeviceInfo* vulkan_device_info(ID3D12Device* device) {

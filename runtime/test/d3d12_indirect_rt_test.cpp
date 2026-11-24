@@ -545,12 +545,14 @@ int main() {
 
                 const auto resolver = [&](leonida::ResourceId id) -> const leonida::ResourceBinding* {
                     // Treat the two upload buffers as backing stores for slices that start after a prefix.
+                    // Upload buffers are arena ranges (M8): their start in the arena comes first.
                     static leonida::ResourceBinding arg_b{}, cnt_b{};
-                    arg_b.buffer = rt::d3d12::vulkan_buffer(arg_buf);
-                    arg_b.buffer_offset = argument_base;
+                    VkDeviceSize arg_start = 0, cnt_start = 0;
+                    rt::d3d12::vulkan_buffer_range(arg_buf, arg_b.buffer, arg_start);
+                    arg_b.buffer_offset = arg_start + argument_base;
                     arg_b.size = buffer_size - argument_base;
-                    cnt_b.buffer = rt::d3d12::vulkan_buffer(count_buf);
-                    cnt_b.buffer_offset = count_base;
+                    rt::d3d12::vulkan_buffer_range(count_buf, cnt_b.buffer, cnt_start);
+                    cnt_b.buffer_offset = cnt_start + count_base;
                     cnt_b.size = buffer_size - count_base;
                     if (id == rt::d3d12::resource_id(arg_buf)) return &arg_b;
                     if (id == rt::d3d12::resource_id(count_buf)) return &cnt_b;
@@ -572,10 +574,12 @@ int main() {
                                      0, 0, nullptr, 0, nullptr, 1, &b_to_src);
 
                 VkBufferImageCopy bic{};
+                VkBuffer rb_buffer = VK_NULL_HANDLE;
+                rt::d3d12::vulkan_buffer_range(rb, rb_buffer, bic.bufferOffset);  // a readback buffer: an arena range
                 bic.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
                 bic.imageExtent = {kW, kH, 1};
                 vkCmdCopyImageToBuffer(cb, rt::d3d12::vulkan_image(rt), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                                       rt::d3d12::vulkan_buffer(rb), 1, &bic);
+                                       rb_buffer, 1, &bic);
 
                 VkMemoryBarrier host_b{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
                 host_b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -1026,7 +1030,8 @@ int main() {
             VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR};
         as_write.accelerationStructureCount = 1;
         as_write.pAccelerationStructures = &tlas_vk;
-        VkDescriptorBufferInfo out_bi{rt::d3d12::vulkan_buffer(out_buf), 0, 64};
+        VkDescriptorBufferInfo out_bi{VK_NULL_HANDLE, 0, 64};
+        rt::d3d12::vulkan_buffer_range(out_buf, out_bi.buffer, out_bi.offset);  // a readback buffer: an arena range
 
         VkWriteDescriptorSet writes[2]{};
         writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
