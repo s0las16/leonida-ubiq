@@ -2888,7 +2888,20 @@ HRESULT proxy_create_compute_pipeline_state(DeviceProxy* self, const D3D12_COMPU
     if (!out) return E_POINTER;
     *out = nullptr;
     if (!riid) return E_POINTER;
-    return self->real->CreateComputePipelineState(desc, *riid, out);
+    // Every failed call is logged with its number, and the first success once: XboxBvhBuilder.dll creates its
+    // pipelines one after the other and throws on a failure, so the log must say which call it was.
+    static std::atomic<std::uint64_t> calls{0};
+    static std::atomic<bool> ok_logged{false};
+    const std::uint64_t call = calls.fetch_add(1, std::memory_order_relaxed) + 1;
+    const HRESULT hr = self->real->CreateComputePipelineState(desc, *riid, out);
+    if (FAILED(hr))
+        std::fprintf(stderr, "[rt] d3d12_xs: slot 62 call %llu failed with 0x%08lx (CS %llu B)\n",
+                     static_cast<unsigned long long>(call), static_cast<unsigned long>(hr),
+                     static_cast<unsigned long long>(desc ? desc->CS.BytecodeLength : 0));
+    else if (!ok_logged.exchange(true, std::memory_order_relaxed))
+        std::fprintf(stderr, "[rt] d3d12_xs: slot 62 call %llu created a compute pipeline\n",
+                     static_cast<unsigned long long>(call));
+    return hr;
 }
 
 // The Xbox slot 41 is CreateCommandSignature at its PC position, (desc, root signature, riid, out), but a console

@@ -1156,8 +1156,9 @@ struct DeviceState {
                     std::fprintf(stderr, "[rt] d3d12: %s\n", error.c_str());
                 else {
                     const auto path = shader_library.directory().u8string();
-                    std::fprintf(stderr, "[rt] d3d12: %zu translated shaders from %s\n",
-                                 shader_library.size(), reinterpret_cast<const char*>(path.c_str()));
+                    std::fprintf(stderr, "[rt] d3d12: %zu translated shaders from %s (fspx/library %zu, bvh %zu)\n",
+                                 shader_library.size(), reinterpret_cast<const char*>(path.c_str()),
+                                 shader_library.fspx_size(), shader_library.bvh_size());
                 }
             } catch (const std::exception& e) {
                 std::fprintf(stderr, "[rt] d3d12: invalid translated shader path: %s\n", e.what());
@@ -4580,7 +4581,10 @@ public:
         VkShaderModuleCreateInfo module_info{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
         module_info.codeSize = words.size() * 4;
         module_info.pCode = words.data();
-        if (vk.vkCreateShaderModule(dev, &module_info, nullptr, &module_) != VK_SUCCESS) return E_FAIL;
+        if (const VkResult r = vk.vkCreateShaderModule(dev, &module_info, nullptr, &module_); r != VK_SUCCESS) {
+            std::fprintf(stderr, "[rt] d3d12: vkCreateShaderModule for %s failed (%d)\n", entry->name.c_str(), int(r));
+            return E_FAIL;
+        }
         const VkPushConstantRange push{VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(leonida::ShaderUserData)};
         VkPipelineLayoutCreateInfo layout_info{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
         layout_info.pushConstantRangeCount = 1;
@@ -4592,7 +4596,10 @@ public:
             layout_info.pSetLayouts = &set0_layout;
             pipeline_.bindless_set = device_.bindless->set();
         }
-        if (vk.vkCreatePipelineLayout(dev, &layout_info, nullptr, &pipeline_.layout) != VK_SUCCESS) return E_FAIL;
+        if (const VkResult r = vk.vkCreatePipelineLayout(dev, &layout_info, nullptr, &pipeline_.layout); r != VK_SUCCESS) {
+            std::fprintf(stderr, "[rt] d3d12: vkCreatePipelineLayout for %s failed (%d)\n", entry->name.c_str(), int(r));
+            return E_FAIL;
+        }
         VkComputePipelineCreateInfo pipeline_info{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
         pipeline_info.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
         pipeline_info.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
@@ -4604,8 +4611,11 @@ public:
         const VkPipelineCache cache = device_.pipeline_cache();
         const bool checkpoint = cache && startup_cache_checkpoints_enabled();
         const ULONGLONG started = checkpoint ? GetTickCount64() : 0;
-        if (vk.vkCreateComputePipelines(dev, cache, 1, &pipeline_info, nullptr, &pipeline_.pipeline) != VK_SUCCESS)
+        if (const VkResult r = vk.vkCreateComputePipelines(dev, cache, 1, &pipeline_info, nullptr, &pipeline_.pipeline);
+            r != VK_SUCCESS) {
+            std::fprintf(stderr, "[rt] d3d12: vkCreateComputePipelines for %s failed (%d)\n", entry->name.c_str(), int(r));
             return E_FAIL;
+        }
         if (checkpoint && GetTickCount64() - started >= 500) {
             const std::unique_lock lock(device_.startup_cache_checkpoint_mutex, std::try_to_lock);
             if (lock.owns_lock()) {
